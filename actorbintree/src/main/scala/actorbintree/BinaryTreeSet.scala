@@ -51,7 +51,7 @@ object BinaryTreeSet {
 }
 
 
-class BinaryTreeSet extends Actor {
+class BinaryTreeSet extends Actor with Stash {
   import BinaryTreeSet._
   import BinaryTreeNode._
 
@@ -82,17 +82,18 @@ class BinaryTreeSet extends Actor {
     */
   def garbageCollecting(newRoot: ActorRef): Receive = {
     case GC =>
-    case op: Operation =>
-      pendingQueue = pendingQueue.enqueue(op)
+    case op: Operation => stash()
+//      pendingQueue = pendingQueue.enqueue(op)
     case CopyFinished => {
       root ! PoisonPill
       root = newRoot
 
-      while(!pendingQueue.isEmpty) {
-        val (op, rest) = pendingQueue.dequeue
-        pendingQueue = rest
-        root ! op
-      }
+      unstashAll()
+//      while(!pendingQueue.isEmpty) {
+//        val (op, rest) = pendingQueue.dequeue
+//        pendingQueue = rest
+//        root ! op
+//      }
 
       context.become(normal)
     }
@@ -163,7 +164,10 @@ class BinaryTreeNode(val elem: Int, initiallyRemoved: Boolean) extends Actor wit
         }
       }
     case op: Remove =>
-      if(op.elem < elem) {
+      if(op.elem == elem) {
+        removed = true
+        op.requester ! OperationFinished(op.id)
+      } else if(op.elem < elem) {
         subtrees.get(Left) match {
           case Some(l) => l ! op
           case _ => op.requester ! OperationFinished(op.id)
@@ -173,35 +177,34 @@ class BinaryTreeNode(val elem: Int, initiallyRemoved: Boolean) extends Actor wit
           case Some(r) => r ! op
           case _ => op.requester ! OperationFinished(op.id)
         }
-      } else if(op.elem == elem) {
-        removed = true
-        op.requester ! OperationFinished(op.id)
       }
-    case CopyTo(dest) => {
-      val children: Set[ActorRef] = subtrees.values.toSet
-      if(removed && children.isEmpty) {
-        context.parent ! CopyFinished
-      } else {
-        context.become(copying(children, removed))
-        children foreach(_ ! CopyTo(dest))
-        if(!removed) dest ! Insert(self, randID, elem)
-      }
-//      (removed, children) match {
-//        case (true, c) if c.isEmpty => context.parent ! CopyFinished
-//        case _ =>
-//          context.become(copying(children, removed))
-//          children foreach (_ ! CopyTo(dest))
-//          if(!removed) dest ! Insert(self, randID, elem)
-//      }
+    case CopyTo(dest) => copyTo(dest)
+//    case res: ContainsResult => context.parent ! res
+//    case res: OperationFinished => context.parent ! res
+  }
+
+  def copyTo(dest: ActorRef) = {
+    val children: Set[ActorRef] = subtrees.values.toSet
+    if(removed && children.isEmpty) {
+      context.parent ! CopyFinished
+    } else {
+      if(!removed) dest ! Insert(self, -1, elem)
+      children foreach(_ ! CopyTo(dest))
+      context.become(copying(children, removed))
     }
-    case res: ContainsResult => context.parent ! res
-    case res: OperationFinished => context.parent ! res
+    //      (removed, children) match {
+    //        case (true, c) if c.isEmpty => context.parent ! CopyFinished
+    //        case _ =>
+    //          context.become(copying(children, removed))
+    //          children foreach (_ ! CopyTo(dest))
+    //          if(!removed) dest ! Insert(self, randID, elem)
+    //      }
   }
 
   private def spawn(id: Int, elem: Int) =
-    context.actorOf(BinaryTreeNode.props(elem, false), "name-" + id)
+    context.actorOf(BinaryTreeNode.props(elem, false))
 
-  private def randID = (scala.math.abs(Random.nextInt(1000)) +1000) * (-1)
+  private def randID = (scala.math.abs(Random.nextInt(1000)) + 1000) * (-1)
 
   // optional
   /** `expected` is the set of ActorRefs whose replies we are waiting for,
@@ -214,12 +217,12 @@ class BinaryTreeNode(val elem: Int, initiallyRemoved: Boolean) extends Actor wit
 //        case (1, true) => context.parent ! CopyFinished
         case (0, true) =>
           context.parent ! CopyFinished
-          context.unbecome()
         case _ => context.become(copying(newSet, insertConfirmed))
     }
-    case OperationFinished =>
+    case OperationFinished(-1) =>
       expected.size match {
-        case 0 => context.parent ! CopyFinished
+        case 0 =>
+          context.parent ! CopyFinished
         case _ => context.become(copying(expected, true))
       }
   }
